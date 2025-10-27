@@ -20,17 +20,24 @@ enum AirQualityState { GOOD, MODERATE, POOR, HAZARDOUS };
 enum AirQualityState currentState = GOOD;
 const char *stateNames[] = {"GOOD    ", "MODERATE", "POOR    ", "HAZARDOUS"};
 
-// --- PPM Thresholds (TUNE THESE!) ---
-#define CO_MODERATE_ON  10.0f
-#define CO_POOR_ON      50.0f  // BUZZER ON
-#define CO_HAZARD_ON    100.0f
-#define AQ_MODERATE_ON  20.0f
-#define AQ_POOR_ON      75.0f  // BUZZER ON
-#define AQ_HAZARD_ON    150.0f
-#define CO_MODERATE_OFF 45.0f  // Buzzer OFF
-#define CO_GOOD_OFF     8.0f
-#define AQ_MODERATE_OFF 70.0f  // Buzzer OFF
-#define AQ_GOOD_OFF     15.0f
+
+// --- Hysteresis Thresholds (Raw ADC 0-1023) ---
+// "Turn On" thresholds
+#define CO_MODERATE_ON  300
+#define CO_POOR_ON      600  // BUZZER ON
+#define CO_HAZARD_ON    800
+
+#define AQ_MODERATE_ON  350
+#define AQ_POOR_ON      550  // BUZZER ON
+#define AQ_HAZARD_ON    750
+
+// "Turn Off" thresholds (hysteresis)
+#define CO_MODERATE_OFF 550  // Buzzer OFF
+#define CO_GOOD_OFF     250
+
+#define AQ_MODERATE_OFF 500  // Buzzer OFF
+#define AQ_GOOD_OFF     300
+
 
 // --- Global Variables ---
 volatile int data_ready = 0;
@@ -249,7 +256,7 @@ int main(void) {
                 update_system_state(co_ppm, aq_ppm);
 
                 lcd_command(0x80); // Line 1
-                sprintf(lcdBuffer, "CO:%.1f AQ:%.1f ", co_ppm, aq_ppm);
+                sprintf(lcdBuffer, "CO:%.1f NO:%.1f ", co_ppm, aq_ppm);
                 lcd_string(lcdBuffer);
 
                 lcd_command(0xC0); // Line 2
