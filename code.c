@@ -205,20 +205,21 @@ void UART1_IRQHandler(void) {
 
 // --- Conversion Functions (Using Float for Accuracy) ---
 int convert_co_to_ppm(int raw_value) {
-    if (raw_value <= CO_RAW_MIN) return CO_BASE_PPM;
+  float ppm = ((float)(raw_value - CO_RAW_MIN) * CO_MAX_PPM) / (float)(CO_RAW_MAX - CO_RAW_MIN);  
+	if (raw_value <= CO_RAW_MIN) return CO_BASE_PPM;
     if (raw_value >= CO_RAW_MAX) return CO_MAX_PPM;
     
     // Use float for calculation
-    float ppm = ((float)(raw_value - CO_RAW_MIN) * CO_MAX_PPM) / (float)(CO_RAW_MAX - CO_RAW_MIN);
+    
     return (int)ppm; // Convert back to int
 }
 
 int convert_aq_to_aqi(int raw_value) {
+	float aqi = ((float)(raw_value - AQ_RAW_MIN) * AQI_MAX) / (float)(AQ_RAW_MAX - AQ_RAW_MIN);
     if (raw_value <= AQ_RAW_MIN) return AQI_MIN;
     if (raw_value >= AQ_RAW_MAX) return AQI_MAX;
     
-    // Use float for calculation
-    float aqi = ((float)(raw_value - AQ_RAW_MIN) * AQI_MAX) / (float)(AQ_RAW_MAX - AQ_RAW_MIN);
+   
     return (int)aqi; // Convert back to int
 }
 
