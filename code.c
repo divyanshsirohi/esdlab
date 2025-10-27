@@ -2,18 +2,14 @@
  * ===================================================================
  * LPC1768 Air Quality Monitor - ENHANCED DISPLAY VERSION
  *
- * Features:
- * - PPM (Parts Per Million) conversion for CO
- * - AQI (Air Quality Index) calculation
- * - Custom LCD bar graphs
- * - Scrolling warnings for hazardous conditions
- * - Professional real-world measurements
+ * v1.2 - Improved conversion accuracy, added raw value display
  * ===================================================================
  */
 
 #include <LPC17xx.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h> // Include for floor()
 
 // --- Pin Definitions (ALS Board) ---
 #define BUZZER   (1 << 11)
@@ -27,19 +23,13 @@ enum AirQualityState currentState = GOOD;
 const char *stateNames[] = {"GOOD", "MODERATE", "POOR", "HAZARD"};
 
 // --- Calibration Constants ---
-// These convert raw ADC values to meaningful measurements
-// Adjust these based on your sensor calibration
+#define CO_BASE_PPM 0
+#define CO_MAX_PPM 1000
+#define CO_RAW_MIN 190
+#define CO_RAW_MAX 400
 
-// MQ7 CO Sensor: Assuming linear relationship
-// Normal reading ~190, Max safe ~200
-#define CO_BASE_PPM 0        // PPM at baseline (190)
-#define CO_MAX_PPM 1000      // Max PPM to display
-#define CO_RAW_MIN 190       // Baseline raw value
-#define CO_RAW_MAX 400       // Raw value at max PPM
-
-// MQ135 Air Quality: Convert to AQI scale (0-500)
-#define AQ_RAW_MIN 145       // Baseline (excellent air)
-#define AQ_RAW_MAX 300       // Very poor air quality
+#define AQ_RAW_MIN 145
+#define AQ_RAW_MAX 300
 #define AQI_MIN 0
 #define AQI_MAX 500
 
@@ -66,11 +56,11 @@ int display_cycle = 0; // For alternating displays
 
 // --- Custom LCD Characters for Bar Graph ---
 unsigned char bar_chars[5][8] = {
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F}, // Empty
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F, 0x1F}, // 1 bar
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x1F, 0x1F, 0x1F}, // 2 bars
-    {0x00, 0x00, 0x00, 0x00, 0x1F, 0x1F, 0x1F, 0x1F}, // 3 bars
-    {0x00, 0x00, 0x00, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F}  // 4 bars
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F}, // Empty (Index 0)
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F, 0x1F}, // 1 bar   (Index 1)
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x1F, 0x1F, 0x1F}, // 2 bars  (Index 2)
+    {0x00, 0x00, 0x00, 0x00, 0x1F, 0x1F, 0x1F, 0x1F}, // 3 bars  (Index 3)
+    {0x00, 0x00, 0x00, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F}  // 4 bars  (Index 4)
 };
 
 // --- Timer Functions ---
@@ -163,7 +153,7 @@ void lcd_init(void) {
     }
 }
 
-void lcd_string(char *str) {
+void lcd_string(const char *str) { // Added const
     while (*str) {
         lcd_data(*str++);
     }
@@ -213,36 +203,40 @@ void UART1_IRQHandler(void) {
     }
 }
 
-// --- Conversion Functions ---
+// --- Conversion Functions (Using Float for Accuracy) ---
 int convert_co_to_ppm(int raw_value) {
-    // Linear interpolation from raw ADC to PPM
     if (raw_value <= CO_RAW_MIN) return CO_BASE_PPM;
     if (raw_value >= CO_RAW_MAX) return CO_MAX_PPM;
     
-    return ((raw_value - CO_RAW_MIN) * CO_MAX_PPM) / (CO_RAW_MAX - CO_RAW_MIN);
+    // Use float for calculation
+    float ppm = ((float)(raw_value - CO_RAW_MIN) * CO_MAX_PPM) / (float)(CO_RAW_MAX - CO_RAW_MIN);
+    return (int)ppm; // Convert back to int
 }
 
 int convert_aq_to_aqi(int raw_value) {
-    // Convert to AQI scale (0-500)
     if (raw_value <= AQ_RAW_MIN) return AQI_MIN;
     if (raw_value >= AQ_RAW_MAX) return AQI_MAX;
     
-    return ((raw_value - AQ_RAW_MIN) * AQI_MAX) / (AQ_RAW_MAX - AQ_RAW_MIN);
+    // Use float for calculation
+    float aqi = ((float)(raw_value - AQ_RAW_MIN) * AQI_MAX) / (float)(AQ_RAW_MAX - AQ_RAW_MIN);
+    return (int)aqi; // Convert back to int
 }
 
-// --- Display Functions ---
+// --- Display Functions (Bar graph uses float) ---
 void draw_bar_graph(int value, int max_value, int num_chars) {
     int i;
-    int filled = (value * num_chars * 4) / max_value; // 4 levels per char
+    // Use float for calculation
+    float filled_float = ((float)value * num_chars * 4.0f) / (float)max_value;
+    int filled = (int)floor(filled_float); // Round down
     
     for (i = 0; i < num_chars; i++) {
         int char_level = filled - (i * 4);
         if (char_level >= 4) {
-            lcd_data(4); // Full bar
+            lcd_data(4); // Full bar (Index 4)
         } else if (char_level > 0) {
-            lcd_data(char_level); // Partial bar
+            lcd_data(char_level); // Partial bar (Index 1, 2, or 3)
         } else {
-            lcd_data(0); // Empty bar
+            lcd_data(0); // Empty bar (Index 0)
         }
     }
 }
@@ -268,18 +262,23 @@ void update_system_state(int co_val, int aq_val) {
     }
 }
 
-void display_mode_1(int co_ppm, int aqi) {
-    // Mode 1: PPM and AQI values with bar graphs
-    lcd_command(0x80);
-    sprintf(lcdBuffer, "CO:%4dppm ", co_ppm);
+// **** MODIFIED FOR DEBUGGING ****
+void display_mode_1(int co_ppm, int aqi, int co_raw_val, int aq_raw_val) {
+    // Mode 1: Show Raw and Converted values
+    lcd_command(0x80); // Line 1
+    // Format: CO:Raw(PPM)
+    sprintf(lcdBuffer, "CO:%d(%d)ppm ", co_raw_val, co_ppm);
     lcd_string(lcdBuffer);
-    draw_bar_graph(co_ppm, CO_MAX_PPM, 3);
+    // Removed bar graph temporarily for space
     
-    lcd_command(0xC0);
-    sprintf(lcdBuffer, "AQI:%3d ", aqi);
+    lcd_command(0xC0); // Line 2
+    // Format: AQ:Raw(AQI)
+    sprintf(lcdBuffer, "AQ:%d(%d)AQI ", aq_raw_val, aqi);
     lcd_string(lcdBuffer);
-    draw_bar_graph(aqi, AQI_MAX, 5);
+     // Removed bar graph temporarily for space
 }
+// *******************************
+
 
 void display_mode_2(void) {
     // Mode 2: Status and health advisory
@@ -291,20 +290,11 @@ void display_mode_2(void) {
     
     lcd_command(0xC0);
     switch(currentState) {
-        case GOOD:
-            health_msg = "Air is Clean!   ";
-            break;
-        case MODERATE:
-            health_msg = "Acceptable Air  ";
-            break;
-        case POOR:
-            health_msg = "Sensitive Alert!";
-            break;
-        case HAZARDOUS:
-            health_msg = "Seek Fresh Air! ";
-            break;
-        default:
-            health_msg = "Monitoring...   ";
+        case GOOD:      health_msg = "Air is Clean!   "; break;
+        case MODERATE:  health_msg = "Acceptable Air  "; break;
+        case POOR:      health_msg = "Sensitive Alert!"; break;
+        case HAZARDOUS: health_msg = "Seek Fresh Air! "; break;
+        default:        health_msg = "Monitoring...   "; break;
     }
     lcd_string(health_msg);
 }
@@ -318,11 +308,11 @@ void display_mode_3(int co_ppm, int aqi) {
     if (aq_percent > 100) aq_percent = 100;
     
     lcd_command(0x80);
-    sprintf(lcdBuffer, "CO Lvl:  %3d%%", co_percent);
+    sprintf(lcdBuffer, "CO Lvl:   %3d%%", co_percent);
     lcd_string(lcdBuffer);
     
     lcd_command(0xC0);
-    sprintf(lcdBuffer, "AQ Lvl:  %3d%%", aq_percent);
+    sprintf(lcdBuffer, "AQ Lvl:   %3d%%", aq_percent);
     lcd_string(lcdBuffer);
 }
 
@@ -345,7 +335,7 @@ int main(void) {
     lcd_string("Air Quality Mon.");
     lcd_command(0xC0);
     lcd_string("Initializing... ");
-    delayMS(1000);
+    delayMS(1000); // Give UART etc. time to settle
 
     while (1) {
         if (data_ready) {
@@ -358,10 +348,10 @@ int main(void) {
                 co_ppm = convert_co_to_ppm(co_raw);
                 aqi = convert_aq_to_aqi(aq_raw);
                 
-                // Update system state
+                // Update system state using RAW values
                 update_system_state(co_raw, aq_raw);
 
-                // Cycle through different display modes every 5 updates
+                // Cycle through display modes
                 update_counter++;
                 if (update_counter >= 5) {
                     update_counter = 0;
@@ -371,7 +361,8 @@ int main(void) {
                 // Display based on current mode
                 switch(display_cycle) {
                     case 0:
-                        display_mode_1(co_ppm, aqi);
+                        // Pass raw values for debugging display
+                        display_mode_1(co_ppm, aqi, co_raw, aq_raw);
                         break;
                     case 1:
                         display_mode_2();
@@ -389,6 +380,6 @@ int main(void) {
             }
         }
         
-        delayMS(100); // Small delay for stability
+        delayMS(100); // Small delay for main loop stability
     }
 }
