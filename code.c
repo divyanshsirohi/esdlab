@@ -2,7 +2,9 @@
  * ===================================================================
  * LPC1768 Air Quality Monitor (Receiver)
  *
- * v2.0 - With robust, timer-based delays to fix LCD gibberish.
+ * v3.1 - Corrected to parse INTEGER data from Arduino
+ * - Expects data as: "190,145\n"
+ * - Uses your tuned INTEGER thresholds.
  * ===================================================================
  */
 
@@ -20,42 +22,36 @@ enum AirQualityState { GOOD, MODERATE, POOR, HAZARDOUS };
 enum AirQualityState currentState = GOOD;
 const char *stateNames[] = {"GOOD    ", "MODERATE", "POOR    ", "HAZARDOUS"};
 
+// --- INTEGER Thresholds (Based on your tuned values) ---
+// MQ7 (CO) thresholds based on normal readings up to 200
+#define CO_MODERATE_ON  210
+#define CO_POOR_ON      250  // BUZZER ON for CO
+#define CO_HAZARD_ON    300
 
-// --- Hysteresis Thresholds (Raw ADC 0-1023) ---
-// "Turn On" thresholds
-#define CO_MODERATE_ON  300
-#define CO_POOR_ON      600  // BUZZER ON
-#define CO_HAZARD_ON    800
+#define CO_MODERATE_OFF 240  // Buzzer OFF for CO
+#define CO_GOOD_OFF     205
 
-#define AQ_MODERATE_ON  350
-#define AQ_POOR_ON      550  // BUZZER ON
-#define AQ_HAZARD_ON    750
+// MQ135 (AQ) thresholds based on normal readings up to 150
+#define AQ_MODERATE_ON  160  // AQ reading goes from 150 up to 160
+#define AQ_POOR_ON      180  // BUZZER ON for AQ
+#define AQ_HAZARD_ON    250  // Even more critical warning
 
-// "Turn Off" thresholds (hysteresis)
-#define CO_MODERATE_OFF 550  // Buzzer OFF
-#define CO_GOOD_OFF     250
-
-#define AQ_MODERATE_OFF 500  // Buzzer OFF
-#define AQ_GOOD_OFF     300
-
+#define AQ_MODERATE_OFF 175  // Buzzer OFF for AQ
+#define AQ_GOOD_OFF     155
 
 // --- Global Variables ---
 volatile int data_ready = 0;
 char rx_buffer[40];
 char lcdBuffer[20];
+int co_raw, aq_raw; // Switched to global int
 
-// --- Timer-Based Delay Functions (Replaces old 'delay') ---
+// --- Timer-Based Delay Functions ---
 
-// Initializes Timer0 to be a microsecond-tick timer.
-// This is now "clock-agnostic" and will calculate the
-// correct prescaler based on your SystemCoreClock.
 void initTimer0(void) {
     uint32_t pclk;
     
     LPC_SC->PCONP |= (1 << 1); // power on Timer0
 
-    // Get the peripheral clock for Timer0
-    // By default, PCLK_TIMER0 = CCLK / 4
     pclk = SystemCoreClock / 4; 
     
     LPC_TIM0->CTCR = 0x0;      // timer mode
@@ -66,7 +62,6 @@ void initTimer0(void) {
     LPC_TIM0->TCR = 0x02;      // reset timer
 }
 
-// Reliable microsecond delay
 void delayUS(unsigned int us) {
     LPC_TIM0->TCR = 0x02; // reset timer
     LPC_TIM0->TCR = 0x01; // start timer
@@ -74,7 +69,6 @@ void delayUS(unsigned int us) {
     LPC_TIM0->TCR = 0x00; // stop timer
 }
 
-// Reliable millisecond delay
 void delayMS(unsigned int ms) {
     delayUS(ms * 1000);
 }
@@ -113,13 +107,11 @@ void lcd_data(unsigned char data) {
     delayUS(50); // Data writes need ~40us
 }
 
-// Corrected initialization sequence with proper delays
 void lcd_init(void) {
     LPC_GPIO0->FIODIR |= LCD_DATA_MASK | LCD_RS | LCD_EN;
     
     delayMS(20); // Wait >15ms after power on
     
-    // Manually force 8-bit mode (required by datasheet)
     lcd_send_nibble(0x03);
     delayMS(5);
     lcd_send_nibble(0x03);
@@ -127,19 +119,14 @@ void lcd_init(void) {
     lcd_send_nibble(0x03);
     delayUS(100);
     
-    // Switch to 4-bit mode
     lcd_send_nibble(0x02);
     delayUS(100);
     
-    // Now in 4-bit mode, send full commands
     lcd_command(0x28); // 4-bit, 2 line, 5x7 font
     lcd_command(0x0C); // Display ON, cursor off
     lcd_command(0x06); // Entry mode: increment cursor, no shift
     lcd_command(0x01); // Clear display
     
-    // *** THIS IS THE CRITICAL FIX ***
-    // The "Clear Display" command takes a long time.
-    // The original code did not wait long enough.
     delayMS(2); // Wait > 1.6ms for clear display
 }
 
@@ -149,29 +136,22 @@ void lcd_string(char *str) {
     }
 }
 
-// --- UART1 Functions (Unchanged) ---
-// --- UART1 Functions (Robust Version) ---
+// --- UART1 Functions (Robust, 9600 Baud) ---
 void init_uart1(void) {
     uint32_t pclk;
     uint16_t baud_divisor;
     
     LPC_SC->PCONP |= (1 << 4); // Power on UART1
     
-    // Config P0.15 as TXD1 and P0.16 as RXD1
     LPC_PINCON->PINSEL0 |= (1 << 30); // P0.15 = TXD1
     LPC_PINCON->PINSEL1 |= (1 << 0);  // P0.16 = RXD1
     
-    // --- Automatic Baud Rate Calculation ---
-    // 1. Get the Peripheral Clock (PCLK) for UART1
-    pclk = SystemCoreClock / 4; // By default, PCLK is CCLK/4
+    pclk = SystemCoreClock / 4; 
     
-    // 2. Calculate the divisor for 9600 baud
-    // Divisor = PCLK / (16 * BaudRate)
     baud_divisor = (pclk / (16 * 9600));
     
     LPC_UART1->LCR = 0x83; // 8-N-1, Enable DLAB
     
-    // 3. Set the calculated divisor
     LPC_UART1->DLL = baud_divisor & 0xFF; // Low byte
     LPC_UART1->DLM = (baud_divisor >> 8) & 0xFF; // High byte
     
@@ -179,7 +159,6 @@ void init_uart1(void) {
     
     LPC_UART1->FCR = 0x07; // Enable and reset FIFOs
     
-    // Enable Receive Data Available (RDA) Interrupt
     LPC_UART1->IER = (1 << 0);
     
     NVIC_EnableIRQ(UART1_IRQn);
@@ -202,23 +181,23 @@ void UART1_IRQHandler(void) {
     }
 }
 
-// --- State Logic Function (Unchanged) ---
-void update_system_state(float co_ppm, float aq_ppm) {
-    if (co_ppm > CO_HAZARD_ON || aq_ppm > AQ_HAZARD_ON) {
+// --- State Logic Function (Uses Integer ADC Values) ---
+void update_system_state(int co_val, int aq_val) {
+    if (co_val > CO_HAZARD_ON || aq_val > AQ_HAZARD_ON) {
         currentState = HAZARDOUS;
         LPC_GPIO0->FIOSET = BUZZER;
     } 
-    else if (co_ppm > CO_POOR_ON || aq_ppm > AQ_POOR_ON) {
+    else if (co_val > CO_POOR_ON || aq_val > AQ_POOR_ON) {
         currentState = POOR;
         LPC_GPIO0->FIOSET = BUZZER;
     }
-    else if (co_ppm > CO_MODERATE_ON || aq_ppm > AQ_MODERATE_ON) {
+    else if (co_val > CO_MODERATE_ON || aq_val > AQ_MODERATE_ON) {
         currentState = MODERATE;
-        if (co_ppm < CO_MODERATE_OFF && aq_ppm < AQ_MODERATE_OFF) {
+        if (co_val < CO_MODERATE_OFF && aq_val < AQ_MODERATE_OFF) {
             LPC_GPIO0->FIOCLR = BUZZER;
         }
     }
-    else if (co_ppm < CO_GOOD_OFF && aq_ppm < AQ_GOOD_OFF) {
+    else if (co_val < CO_GOOD_OFF && aq_val < AQ_GOOD_OFF) {
         currentState = GOOD;
         LPC_GPIO0->FIOCLR = BUZZER;
     }
@@ -226,16 +205,14 @@ void update_system_state(float co_ppm, float aq_ppm) {
 
 // --- Main Program ---
 int main(void) {
-    float co_ppm, aq_ppm;
     int items_parsed;
 
     SystemInit();
-    SystemCoreClockUpdate(); // This sets the SystemCoreClock variable
+    SystemCoreClockUpdate(); 
     
-    // *** IMPORTANT: Init timer AFTER clock is updated ***
     initTimer0(); 
     
-    lcd_init();       // Init LCD with correct delays
+    lcd_init();
     init_uart1();
 
     LPC_GPIO0->FIODIR |= BUZZER;
@@ -244,19 +221,25 @@ int main(void) {
     lcd_command(0x80); 
     lcd_string("Air Quality Mon.");
     lcd_command(0xC0); 
-    lcd_string("Warming up...."); 
+    lcd_string("Waiting for data"); // Changed message
 
     while (1) {
         if (data_ready) {
             data_ready = 0; 
             
-            items_parsed = sscanf(rx_buffer, "%f,%f", &co_ppm, &aq_ppm);
+            // *** THE CRITICAL CHANGE ***
+            // Parse for integers (%d) not floats (%f)
+            items_parsed = sscanf(rx_buffer, "%d,%d", &co_raw, &aq_raw);
 
             if (items_parsed == 2) {
-                update_system_state(co_ppm, aq_ppm);
+                // 1. Update system state & buzzer
+                update_system_state(co_raw, aq_raw);
 
+                // 2. Update LCD
                 lcd_command(0x80); // Line 1
-                sprintf(lcdBuffer, "CO:%.1f NO:%.1f ", co_ppm, aq_ppm);
+                // Display integers (%d)
+                // Fixed typo to show "AQ" instead of "NO"
+                sprintf(lcdBuffer, "CO:%-5d AQ:%-5d", co_raw, aq_raw);
                 lcd_string(lcdBuffer);
 
                 lcd_command(0xC0); // Line 2
