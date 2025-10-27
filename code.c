@@ -143,16 +143,38 @@ void lcd_string(char *str) {
 }
 
 // --- UART1 Functions (Unchanged) ---
+// --- UART1 Functions (Robust Version) ---
 void init_uart1(void) {
-    LPC_SC->PCONP |= (1 << 4); 
+    uint32_t pclk;
+    uint16_t baud_divisor;
+    
+    LPC_SC->PCONP |= (1 << 4); // Power on UART1
+    
+    // Config P0.15 as TXD1 and P0.16 as RXD1
     LPC_PINCON->PINSEL0 |= (1 << 30); // P0.15 = TXD1
     LPC_PINCON->PINSEL1 |= (1 << 0);  // P0.16 = RXD1
-    LPC_UART1->LCR = 0x83; 
-    LPC_UART1->DLL = 162;  // 9600 Baud
-    LPC_UART1->DLM = 0;
-    LPC_UART1->LCR = 0x03; 
-    LPC_UART1->FCR = 0x07; 
-    LPC_UART1->IER = (1 << 0); 
+    
+    // --- Automatic Baud Rate Calculation ---
+    // 1. Get the Peripheral Clock (PCLK) for UART1
+    pclk = SystemCoreClock / 4; // By default, PCLK is CCLK/4
+    
+    // 2. Calculate the divisor for 9600 baud
+    // Divisor = PCLK / (16 * BaudRate)
+    baud_divisor = (pclk / (16 * 9600));
+    
+    LPC_UART1->LCR = 0x83; // 8-N-1, Enable DLAB
+    
+    // 3. Set the calculated divisor
+    LPC_UART1->DLL = baud_divisor & 0xFF; // Low byte
+    LPC_UART1->DLM = (baud_divisor >> 8) & 0xFF; // High byte
+    
+    LPC_UART1->LCR = 0x03; // Disable DLAB
+    
+    LPC_UART1->FCR = 0x07; // Enable and reset FIFOs
+    
+    // Enable Receive Data Available (RDA) Interrupt
+    LPC_UART1->IER = (1 << 0);
+    
     NVIC_EnableIRQ(UART1_IRQn);
 }
 
