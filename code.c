@@ -1,14 +1,13 @@
 /*
- * ===================================================================
- * LPC1768 Air Quality Monitor - ENHANCED DISPLAY VERSION + DHT11 MODE
- * v1.4 - Adds Temp/Humidity Mode, UART parsing for 4-value packet
- * ===================================================================
+ * ==========================================================================
+ * LPC1768 Air Quality Monitor - v1.5 (Processed Data Edition)
+ * Expects UART data as: CO_PPM,AQI,TEMP,HUM
+ * ==========================================================================
  */
 
 #include <LPC17xx.h>
 #include <stdio.h>
 #include <string.h>
-#include <math.h>
 
 // --- Pin Definitions (ALS Board) ---
 #define BUZZER         (1 << 11)
@@ -21,39 +20,20 @@ enum AirQualityState { GOOD, MODERATE, POOR, HAZARDOUS };
 enum AirQualityState currentState = GOOD;
 const char *stateNames[] = {"GOOD", "MODERATE", "POOR", "HAZARD"};
 
-// --- Calibration Constants ---
-#define CO_BASE_PPM 0
-#define CO_MAX_PPM 1000
-#define CO_RAW_MIN 190
-#define CO_RAW_MAX 400
-
-#define AQ_RAW_MIN 145
-#define AQ_RAW_MAX 300
-#define AQI_MIN 0
-#define AQI_MAX 500
-
-// --- Thresholds ---
-#define CO_MODERATE_ON   240
-#define CO_POOR_ON       250
-#define CO_HAZARD_ON     300
-#define CO_MODERATE_OFF  210
-#define CO_GOOD_OFF      205
-
-#define AQ_MODERATE_ON   160
-#define AQ_POOR_ON       180
-#define AQ_HAZARD_ON     250
-#define AQ_MODERATE_OFF  175
-#define AQ_GOOD_OFF      155
+// --- Thresholds now use PPM & AQI directly ---
+#define CO_MODERATE_ON   25
+#define CO_POOR_ON       35
+#define CO_HAZARD_ON     45
+#define AQ_MODERATE_ON   80
+#define AQ_POOR_ON       120
+#define AQ_HAZARD_ON     200
 
 // --- Globals ---
 volatile int data_ready = 0;
 char rx_buffer[40];
 char lcdBuffer[20];
-int co_raw, aq_raw;
+int co_ppm = 0, aqi = 0, temp = 0, hum = 0;
 int display_cycle = 0;
-
-// NEW globals for Temp & Humidity
-int temp = 0, hum = 0;
 
 // --- Custom LCD Bar Characters ---
 unsigned char bar_chars[5][8] = {
@@ -69,7 +49,7 @@ void initTimer0(void) {
     LPC_SC->PCONP |= (1 << 1);
     uint32_t pclk = SystemCoreClock / 4;
     LPC_TIM0->CTCR = 0x0;
-    LPC_TIM0->PR = (pclk / 1000000) - 1;  // 1 µs tick
+    LPC_TIM0->PR = (pclk / 1000000) - 1;  
     LPC_TIM0->TCR = 0x02;
 }
 
@@ -100,10 +80,8 @@ void lcd_send_nibble(unsigned char nibble) {
 }
 
 void lcd_send_byte(unsigned char byte, int is_data) {
-    if (is_data)
-        LPC_GPIO0->FIOSET = LCD_RS;
-    else
-        LPC_GPIO0->FIOCLR = LCD_RS;
+    if (is_data) LPC_GPIO0->FIOSET = LCD_RS;
+    else LPC_GPIO0->FIOCLR = LCD_RS;
 
     lcd_send_nibble(byte >> 4);
     lcd_send_nibble(byte & 0x0F);
@@ -129,14 +107,10 @@ void lcd_init(void) {
     LPC_GPIO0->FIODIR |= LCD_DATA_MASK | LCD_RS | LCD_EN;
     delayMS(20);
 
-    lcd_send_nibble(0x03);
-    delayMS(5);
-    lcd_send_nibble(0x03);
-    delayUS(100);
-    lcd_send_nibble(0x03);
-    delayUS(100);
-    lcd_send_nibble(0x02);
-    delayUS(100);
+    lcd_send_nibble(0x03); delayMS(5);
+    lcd_send_nibble(0x03); delayUS(100);
+    lcd_send_nibble(0x03); delayUS(100);
+    lcd_send_nibble(0x02); delayUS(100);
 
     lcd_command(0x28);
     lcd_command(0x0C);
@@ -145,10 +119,6 @@ void lcd_init(void) {
     delayMS(2);
 
     for (int i = 0; i < 5; i++) lcd_create_char(i, bar_chars[i]);
-}
-
-void lcd_string(const char *str) {
-    while (*str) lcd_data(*str++);
 }
 
 // --- UART1 Setup ---
@@ -187,60 +157,30 @@ void UART1_IRQHandler(void) {
     }
 }
 
-// --- Conversion Functions ---
-#define RL_CO 10000.0f
-#define VREF 3.3f
-#define CO_M -1.47f
-#define CO_B 1.70f
-#define R0_CO 20000.0f
-
-float convert_co_to_ppm(int raw_adc) {
-    if (raw_adc <= 0) return 0.0f;
-    float v_out = (raw_adc / 1023.0f) * VREF;
-    float rs = (RL_CO * (VREF - v_out)) / v_out;
-    float ratio = rs / R0_CO;
-    float ppm_log = (CO_M * log10f(ratio)) + CO_B;
-    float ppm = powf(10, ppm_log);
-    if (ppm < 0) ppm = 0;
-    if (ppm > 1000) ppm = 1000;
-    return ppm;
-}
-
-int convert_aq_to_aqi(int raw_value) {
-    if (raw_value <= AQ_RAW_MIN) return AQI_MIN;
-    if (raw_value >= AQ_RAW_MAX) return AQI_MAX;
-    float aqi = ((float)(raw_value - AQ_RAW_MIN) * AQI_MAX) / (float)(AQ_RAW_MAX - AQ_RAW_MIN);
-    return (int)aqi;
-}
-
 // --- State Machine ---
-void update_system_state(int co_val, int aq_val) {
-    if (co_val > CO_HAZARD_ON || aq_val > AQ_HAZARD_ON) {
-        currentState = HAZARDOUS;
-        LPC_GPIO0->FIOSET = BUZZER;
+void update_system_state(int co_ppm, int aqi) {
+    if (co_ppm > CO_HAZARD_ON || aqi > AQ_HAZARD_ON) {
+        currentState = HAZARDOUS; LPC_GPIO0->FIOSET = BUZZER;
     } 
-    else if (co_val > CO_POOR_ON || aq_val > AQ_POOR_ON) {
-        currentState = POOR;
-        LPC_GPIO0->FIOSET = BUZZER;
+    else if (co_ppm > CO_POOR_ON || aqi > AQ_POOR_ON) {
+        currentState = POOR; LPC_GPIO0->FIOSET = BUZZER;
     }
-    else if (co_val > CO_MODERATE_ON || aq_val > AQ_MODERATE_ON) {
-        currentState = MODERATE;
-        LPC_GPIO0->FIOCLR = BUZZER;
+    else if (co_ppm > CO_MODERATE_ON || aqi > AQ_MODERATE_ON) {
+        currentState = MODERATE; LPC_GPIO0->FIOCLR = BUZZER;
     }
     else {
-        currentState = GOOD;
-        LPC_GPIO0->FIOCLR = BUZZER;
+        currentState = GOOD; LPC_GPIO0->FIOCLR = BUZZER;
     }
 }
 
 // --- Display Modes ---
-void display_mode_1(int co_ppm, int aqi, int co_raw_val, int aq_raw_val) {
+void display_mode_1(void) {
     lcd_command(0x80);
-    sprintf(lcdBuffer, "CO:%d(%dppm)", co_raw_val, co_ppm);
+    sprintf(lcdBuffer, "CO:%3dppm     ", co_ppm);
     lcd_string(lcdBuffer);
 
     lcd_command(0xC0);
-    sprintf(lcdBuffer, "AQ:%d(%dAQI)", aq_raw_val, aqi);
+    sprintf(lcdBuffer, "AQI:%3d       ", aqi);
     lcd_string(lcdBuffer);
 }
 
@@ -259,9 +199,9 @@ void display_mode_2(void) {
     }
 }
 
-void display_mode_3(int co_ppm, int aqi) {
-    int co_percent = (co_ppm * 100) / CO_MAX_PPM;
-    int aq_percent = (aqi * 100) / AQI_MAX;
+void display_mode_3(void) {
+    int co_percent = (co_ppm * 100) / 100;  
+    int aq_percent = (aqi * 100) / 500;     
     if (co_percent > 100) co_percent = 100;
     if (aq_percent > 100) aq_percent = 100;
 
@@ -274,20 +214,15 @@ void display_mode_3(int co_ppm, int aqi) {
     lcd_string(lcdBuffer);
 }
 
-// --- NEW: Temp + Humidity Mode ---
-void display_mode_4(int temp, int hum) {
+void display_mode_4(void) {
     lcd_command(0x80);
     sprintf(lcdBuffer, "T:%2d\xDF""C  H:%2d%%", temp, hum);
     lcd_string(lcdBuffer);
 
     lcd_command(0xC0);
-
-    if (hum < 30)
-        lcd_string("Dry            ");
-    else if (hum <= 60)
-        lcd_string("Feels Good     ");
-    else
-        lcd_string("Humid          ");
+    if (hum < 30)      lcd_string("Dry            ");
+    else if (hum <=60) lcd_string("Feels Good     ");
+    else               lcd_string("Humid          ");
 }
 
 // --- Main ---
@@ -301,43 +236,35 @@ int main(void) {
     LPC_GPIO0->FIODIR |= BUZZER;
     LPC_GPIO0->FIOCLR = BUZZER;
 
-    lcd_command(0x80);
-    lcd_string("Air Quality Mon.");
-    lcd_command(0xC0);
-    lcd_string("Initializing...");
+    lcd_command(0x80); lcd_string("Air Quality Mon.");
+    lcd_command(0xC0); lcd_string("Initializing...");
     delayMS(1000);
 
-    int co_ppm = 0, aqi = 0, update_counter = 0;
+    int update_counter = 0;
 
     while (1) {
         if (data_ready) {
             data_ready = 0;
 
-            // Updated parsing (4 values expected)
-            if (sscanf(rx_buffer, "%d,%d,%d,%d", &co_raw, &aq_raw, &temp, &hum) == 4) {
+            if (sscanf(rx_buffer, "%d,%d,%d,%d", &co_ppm, &aqi, &temp, &hum) == 4) {
                 
-                co_ppm = (int)convert_co_to_ppm(co_raw);
-                aqi = convert_aq_to_aqi(aq_raw);
-
                 update_system_state(co_ppm, aqi);
 
                 update_counter++;
                 if (update_counter >= 5) {
                     update_counter = 0;
-                    display_cycle = (display_cycle + 1) % 4;    // Now 4 modes
+                    display_cycle = (display_cycle + 1) % 4;  
                 }
 
                 switch(display_cycle) {
-                    case 0: display_mode_1(co_ppm, aqi, co_raw, aq_raw); break;
+                    case 0: display_mode_1(); break;
                     case 1: display_mode_2(); break;
-                    case 2: display_mode_3(co_ppm, aqi); break;
-                    case 3: display_mode_4(temp, hum); break;
+                    case 2: display_mode_3(); break;
+                    case 3: display_mode_4(); break;
                 }
             } else {
-                lcd_command(0x80);
-                lcd_string("Sensor Error    ");
-                lcd_command(0xC0);
-                lcd_string("Check Connection");
+                lcd_command(0x80); lcd_string("Sensor Error    ");
+                lcd_command(0xC0); lcd_string("Check Connection");
             }
         }
         delayMS(100);
