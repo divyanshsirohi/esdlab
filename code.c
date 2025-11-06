@@ -1,7 +1,7 @@
 /*
  * ===================================================================
- * LPC1768 Air Quality Monitor - ENHANCED DISPLAY VERSION
- * v1.3 - Logic corrections, improved state handling, consistent delays
+ * LPC1768 Air Quality Monitor - ENHANCED DISPLAY VERSION + DHT11 MODE
+ * v1.4 - Adds Temp/Humidity Mode, UART parsing for 4-value packet
  * ===================================================================
  */
 
@@ -52,6 +52,9 @@ char lcdBuffer[20];
 int co_raw, aq_raw;
 int display_cycle = 0;
 
+// NEW globals for Temp & Humidity
+int temp = 0, hum = 0;
+
 // --- Custom LCD Bar Characters ---
 unsigned char bar_chars[5][8] = {
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x1F},
@@ -71,11 +74,11 @@ void initTimer0(void) {
 }
 
 void delayUS(unsigned int us) {
-    LPC_TIM0->TCR = 0x02; // Reset
+    LPC_TIM0->TCR = 0x02;
     LPC_TIM0->TC = 0;
-    LPC_TIM0->TCR = 0x01; // Start
+    LPC_TIM0->TCR = 0x01;
     while (LPC_TIM0->TC < us);
-    LPC_TIM0->TCR = 0x00; // Stop
+    LPC_TIM0->TCR = 0x00;
 }
 
 void delayMS(unsigned int ms) {
@@ -271,6 +274,22 @@ void display_mode_3(int co_ppm, int aqi) {
     lcd_string(lcdBuffer);
 }
 
+// --- NEW: Temp + Humidity Mode ---
+void display_mode_4(int temp, int hum) {
+    lcd_command(0x80);
+    sprintf(lcdBuffer, "T:%2d\xDF""C  H:%2d%%", temp, hum);
+    lcd_string(lcdBuffer);
+
+    lcd_command(0xC0);
+
+    if (hum < 30)
+        lcd_string("Dry            ");
+    else if (hum <= 60)
+        lcd_string("Feels Good     ");
+    else
+        lcd_string("Humid          ");
+}
+
 // --- Main ---
 int main(void) {
     SystemInit();
@@ -293,7 +312,10 @@ int main(void) {
     while (1) {
         if (data_ready) {
             data_ready = 0;
-            if (sscanf(rx_buffer, "%d,%d", &co_raw, &aq_raw) == 2) {
+
+            // Updated parsing (4 values expected)
+            if (sscanf(rx_buffer, "%d,%d,%d,%d", &co_raw, &aq_raw, &temp, &hum) == 4) {
+                
                 co_ppm = (int)convert_co_to_ppm(co_raw);
                 aqi = convert_aq_to_aqi(aq_raw);
 
@@ -302,13 +324,14 @@ int main(void) {
                 update_counter++;
                 if (update_counter >= 5) {
                     update_counter = 0;
-                    display_cycle = (display_cycle + 1) % 3;
+                    display_cycle = (display_cycle + 1) % 4;    // Now 4 modes
                 }
 
                 switch(display_cycle) {
                     case 0: display_mode_1(co_ppm, aqi, co_raw, aq_raw); break;
                     case 1: display_mode_2(); break;
                     case 2: display_mode_3(co_ppm, aqi); break;
+                    case 3: display_mode_4(temp, hum); break;
                 }
             } else {
                 lcd_command(0x80);
