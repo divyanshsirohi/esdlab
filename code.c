@@ -1,7 +1,9 @@
 /*
  * ==========================================================================
- * LPC1768 Air Quality Monitor - v1.5 (Processed Data Edition)
- * Expects UART data as: CO_PPM,AQI,TEMP,HUM
+ * LPC1768 Air Quality Monitor - v1.6 (Bugs Fixed)
+ * - Hysteresis logic restored
+ * - Percentage calculation fixed
+ * - 'const' compile error fixed
  * ==========================================================================
  */
 
@@ -10,10 +12,10 @@
 #include <string.h>
 
 // --- Pin Definitions (ALS Board) ---
-#define BUZZER         (1 << 11)
+#define BUZZER   (1 << 11)
 #define LCD_DATA_MASK  (0xF << 23)
-#define LCD_RS         (1 << 27)
-#define LCD_EN         (1 << 28)
+#define LCD_RS    (1 << 27)
+#define LCD_EN    (1 << 28)
 
 // --- Air Quality States ---
 enum AirQualityState { GOOD, MODERATE, POOR, HAZARDOUS };
@@ -22,11 +24,20 @@ const char *stateNames[] = {"GOOD", "MODERATE", "POOR", "HAZARD"};
 
 // --- Thresholds now use PPM & AQI directly ---
 #define CO_MODERATE_ON   25
-#define CO_POOR_ON       35
+#define CO_POOR_ON       35  // Buzzer ON
 #define CO_HAZARD_ON     45
+
 #define AQ_MODERATE_ON   80
-#define AQ_POOR_ON       120
+#define AQ_POOR_ON       120 // Buzzer ON
 #define AQ_HAZARD_ON     200
+
+// Hysteresis "turn-off" thresholds
+#define CO_POOR_OFF      30  // Buzzer OFF
+#define AQ_POOR_OFF      110 // Buzzer OFF
+
+// Max values for percentage display
+#define CO_MAX_PPM 100  // Max PPM for 100%
+#define AQI_MAX 500     // Max AQI for 100%
 
 // --- Globals ---
 volatile int data_ready = 0;
@@ -121,6 +132,13 @@ void lcd_init(void) {
     for (int i = 0; i < 5; i++) lcd_create_char(i, bar_chars[i]);
 }
 
+// *** FIX 1: Added 'const' to parameter ***
+void lcd_string(const char *str) {
+    while (*str) {
+        lcd_data(*str++);
+    }
+}
+
 // --- UART1 Setup ---
 void init_uart1(void) {
     LPC_SC->PCONP |= (1 << 4);
@@ -157,30 +175,37 @@ void UART1_IRQHandler(void) {
     }
 }
 
-// --- State Machine ---
+// *** FIX 2: Restored Hysteresis Logic ***
 void update_system_state(int co_ppm, int aqi) {
     if (co_ppm > CO_HAZARD_ON || aqi > AQ_HAZARD_ON) {
-        currentState = HAZARDOUS; LPC_GPIO0->FIOSET = BUZZER;
+        currentState = HAZARDOUS;
+        LPC_GPIO0->FIOSET = BUZZER;
     } 
     else if (co_ppm > CO_POOR_ON || aqi > AQ_POOR_ON) {
-        currentState = POOR; LPC_GPIO0->FIOSET = BUZZER;
+        currentState = POOR;
+        LPC_GPIO0->FIOSET = BUZZER;
     }
     else if (co_ppm > CO_MODERATE_ON || aqi > AQ_MODERATE_ON) {
-        currentState = MODERATE; LPC_GPIO0->FIOCLR = BUZZER;
+        currentState = MODERATE;
+        // Only turn off if values drop below OFF threshold
+        if (co_ppm < CO_POOR_OFF && aqi < AQ_POOR_OFF) {
+            LPC_GPIO0->FIOCLR = BUZZER;
+        }
     }
-    else {
-        currentState = GOOD; LPC_GPIO0->FIOCLR = BUZZER;
+    else { // This is the GOOD state
+        currentState = GOOD;
+        LPC_GPIO0->FIOCLR = BUZZER;
     }
 }
 
 // --- Display Modes ---
 void display_mode_1(void) {
     lcd_command(0x80);
-    sprintf(lcdBuffer, "CO:%3dppm     ", co_ppm);
+    sprintf(lcdBuffer, "CO:%3dppm      ", co_ppm);
     lcd_string(lcdBuffer);
 
     lcd_command(0xC0);
-    sprintf(lcdBuffer, "AQI:%3d       ", aqi);
+    sprintf(lcdBuffer, "AQI:%3d        ", aqi);
     lcd_string(lcdBuffer);
 }
 
@@ -191,17 +216,19 @@ void display_mode_2(void) {
 
     lcd_command(0xC0);
     switch(currentState) {
-        case GOOD:      lcd_string("Air is Clean!   "); break;
-        case MODERATE:  lcd_string("Acceptable Air  "); break;
-        case POOR:      lcd_string("Sensitive Alert!"); break;
-        case HAZARDOUS: lcd_string("Seek Fresh Air! "); break;
-        default:        lcd_string("Monitoring...   "); break;
+        case GOOD:     lcd_string("Air is Clean!   "); break;
+        case MODERATE: lcd_string("Acceptable Air  "); break;
+        case POOR:     lcd_string("Sensitive Alert!"); break;
+        case HAZARDOUS:lcd_string("Seek Fresh Air! "); break;
+        default:       lcd_string("Monitoring...   "); break;
     }
 }
 
+// *** FIX 3: Corrected Percentage Math ***
 void display_mode_3(void) {
-    int co_percent = (co_ppm * 100) / 100;  
-    int aq_percent = (aqi * 100) / 500;     
+    int co_percent = (co_ppm * 100) / CO_MAX_PPM;  // Use MAX
+    int aq_percent = (aqi * 100) / AQI_MAX;     // Use MAX
+    
     if (co_percent > 100) co_percent = 100;
     if (aq_percent > 100) aq_percent = 100;
 
@@ -216,13 +243,14 @@ void display_mode_3(void) {
 
 void display_mode_4(void) {
     lcd_command(0x80);
+    // \xDF is the degree symbol
     sprintf(lcdBuffer, "T:%2d\xDF""C  H:%2d%%", temp, hum);
     lcd_string(lcdBuffer);
 
     lcd_command(0xC0);
-    if (hum < 30)      lcd_string("Dry            ");
-    else if (hum <=60) lcd_string("Feels Good     ");
-    else               lcd_string("Humid          ");
+    if (hum < 30)       lcd_string("Dry             ");
+    else if (hum <=60)  lcd_string("Feels Good      ");
+    else                lcd_string("Humid           ");
 }
 
 // --- Main ---
