@@ -1,6 +1,7 @@
 /*
  * ==========================================================================
- * LPC1768 Air Quality Monitor - v1.6 (Bugs Fixed)
+ * LPC1768 Air Quality Monitor - v1.7 (Syntax Fixed)
+ * - Removed all non-ASCII characters ("smart quotes", etc.)
  * - Hysteresis logic restored
  * - Percentage calculation fixed
  * - 'const' compile error fixed
@@ -12,10 +13,10 @@
 #include <string.h>
 
 // --- Pin Definitions (ALS Board) ---
-#define BUZZER   (1 << 11)
-#define LCD_DATA_MASK  (0xF << 23)
-#define LCD_RS    (1 << 27)
-#define LCD_EN    (1 << 28)
+#define BUZZER          (1 << 11)
+#define LCD_DATA_MASK   (0xF << 23)
+#define LCD_RS          (1 << 27)
+#define LCD_EN          (1 << 28)
 
 // --- Air Quality States ---
 enum AirQualityState { GOOD, MODERATE, POOR, HAZARDOUS };
@@ -132,7 +133,6 @@ void lcd_init(void) {
     for (int i = 0; i < 5; i++) lcd_create_char(i, bar_chars[i]);
 }
 
-// *** FIX 1: Added 'const' to parameter ***
 void lcd_string(const char *str) {
     while (*str) {
         lcd_data(*str++);
@@ -175,7 +175,7 @@ void UART1_IRQHandler(void) {
     }
 }
 
-// *** FIX 2: Restored Hysteresis Logic ***
+// --- State Machine ---
 void update_system_state(int co_ppm, int aqi) {
     if (co_ppm > CO_HAZARD_ON || aqi > AQ_HAZARD_ON) {
         currentState = HAZARDOUS;
@@ -187,7 +187,6 @@ void update_system_state(int co_ppm, int aqi) {
     }
     else if (co_ppm > CO_MODERATE_ON || aqi > AQ_MODERATE_ON) {
         currentState = MODERATE;
-        // Only turn off if values drop below OFF threshold
         if (co_ppm < CO_POOR_OFF && aqi < AQ_POOR_OFF) {
             LPC_GPIO0->FIOCLR = BUZZER;
         }
@@ -201,11 +200,11 @@ void update_system_state(int co_ppm, int aqi) {
 // --- Display Modes ---
 void display_mode_1(void) {
     lcd_command(0x80);
-    sprintf(lcdBuffer, "CO:%3dppm      ", co_ppm);
+    sprintf(lcdBuffer, "CO:%3dppm       ", co_ppm); // Fixed spacing
     lcd_string(lcdBuffer);
 
     lcd_command(0xC0);
-    sprintf(lcdBuffer, "AQI:%3d        ", aqi);
+    sprintf(lcdBuffer, "AQI:%3d         ", aqi); // Fixed spacing
     lcd_string(lcdBuffer);
 }
 
@@ -224,10 +223,9 @@ void display_mode_2(void) {
     }
 }
 
-// *** FIX 3: Corrected Percentage Math ***
 void display_mode_3(void) {
-    int co_percent = (co_ppm * 100) / CO_MAX_PPM;  // Use MAX
-    int aq_percent = (aqi * 100) / AQI_MAX;     // Use MAX
+    int co_percent = (co_ppm * 100) / CO_MAX_PPM;
+    int aq_percent = (aqi * 100) / AQI_MAX;   
     
     if (co_percent > 100) co_percent = 100;
     if (aq_percent > 100) aq_percent = 100;
@@ -243,7 +241,6 @@ void display_mode_3(void) {
 
 void display_mode_4(void) {
     lcd_command(0x80);
-    // \xDF is the degree symbol
     sprintf(lcdBuffer, "T:%2d\xDF""C  H:%2d%%", temp, hum);
     lcd_string(lcdBuffer);
 
