@@ -64,6 +64,13 @@ char lcdBuffer[20];
 int co_ppm = 0, aqi = 0, temp = 0, hum = 0;
 int display_cycle = 0;
 
+// Buzzer pattern control
+int buzzer_enabled = 0;
+int buzzer_counter = 0;
+#define BUZZER_ON_TIME 10    // 100ms on (10 * 10ms loop delay)
+#define BUZZER_OFF_TIME 10   // 100ms off (10 * 10ms loop delay)
+#define BUZZER_PATTERN_TOTAL (BUZZER_ON_TIME + BUZZER_OFF_TIME)
+
 // Custom LCD characters for bar graph
 unsigned char bar_chars[5][8] = {
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x1F},
@@ -270,7 +277,7 @@ float predict_aqi_hazard(int aqi_val, int temp_c, int hum_pct) {
  * STATE MACHINE: update_system_state
  * =======================================================
  * Uses scores with proper hysteresis to prevent flickering
- * Buzzer activates only in POOR or HAZARDOUS states
+ * Buzzer pattern activates only in POOR or HAZARDOUS states
  * =======================================================
  */
 void update_system_state(float co_score, float aqi_score) {
@@ -297,8 +304,35 @@ void update_system_state(float co_score, float aqi_score) {
         }
     }
     
-    // Buzzer control - ON for POOR and HAZARDOUS only
+    // Buzzer control - Enable pattern for POOR and HAZARDOUS only
     if (currentState == POOR || currentState == HAZARDOUS) {
+        buzzer_enabled = 1;
+    } else {
+        buzzer_enabled = 0;
+        LPC_GPIO0->FIOCLR = BUZZER; // Ensure buzzer is OFF
+    }
+}
+
+/*
+ * =======================================================
+ * FUNCTION: update_buzzer_pattern
+ * =======================================================
+ * Creates a beeping pattern: ON for 100ms, OFF for 100ms
+ * Call this function every loop iteration (every 100ms)
+ * =======================================================
+ */
+void update_buzzer_pattern(void) {
+    if (!buzzer_enabled) {
+        return; // Do nothing if buzzer is disabled
+    }
+    
+    buzzer_counter++;
+    if (buzzer_counter >= BUZZER_PATTERN_TOTAL) {
+        buzzer_counter = 0; // Reset counter
+    }
+    
+    // Turn buzzer ON for first half of pattern, OFF for second half
+    if (buzzer_counter < BUZZER_ON_TIME) {
         LPC_GPIO0->FIOSET = BUZZER;
     } else {
         LPC_GPIO0->FIOCLR = BUZZER;
@@ -409,6 +443,10 @@ int main(void) {
                 lcd_command(0xC0); lcd_string("Check Connection");
             }
         }
+        
+        // Update buzzer pattern every loop iteration
+        update_buzzer_pattern();
+        
         delayMS(100);
     }
 }
