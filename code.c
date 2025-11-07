@@ -9,6 +9,7 @@
 #include <LPC17xx.h>
 #include <stdio.h>
 #include <string.h>
+#include "aq_model.h"
 
 // --- Pin Definitions (ALS Board) ---
 #define BUZZER          (1 << 11)
