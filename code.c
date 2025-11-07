@@ -1,10 +1,7 @@
 /*
  * ==========================================================================
- * LPC1768 Air Quality Monitor - v1.7 (Syntax Fixed)
- * - Removed all non-ASCII characters ("smart quotes", etc.)
- * - Hysteresis logic restored
- * - Percentage calculation fixed
- * - 'const' compile error fixed
+ * LPC1768 Air Quality Monitor - v1.8 (C90 Compliant)
+ * - Fixed all "declaration after statement" errors
  * ==========================================================================
  */
 
@@ -23,22 +20,17 @@ enum AirQualityState { GOOD, MODERATE, POOR, HAZARDOUS };
 enum AirQualityState currentState = GOOD;
 const char *stateNames[] = {"GOOD", "MODERATE", "POOR", "HAZARD"};
 
-// --- Thresholds now use PPM & AQI directly ---
+// ... (Your thresholds remain the same) ...
 #define CO_MODERATE_ON   25
-#define CO_POOR_ON       35  // Buzzer ON
+#define CO_POOR_ON       35
 #define CO_HAZARD_ON     45
-
 #define AQ_MODERATE_ON   80
-#define AQ_POOR_ON       120 // Buzzer ON
+#define AQ_POOR_ON       120
 #define AQ_HAZARD_ON     200
-
-// Hysteresis "turn-off" thresholds
-#define CO_POOR_OFF      30  // Buzzer OFF
-#define AQ_POOR_OFF      110 // Buzzer OFF
-
-// Max values for percentage display
-#define CO_MAX_PPM 100  // Max PPM for 100%
-#define AQI_MAX 500     // Max AQI for 100%
+#define CO_POOR_OFF      30
+#define AQ_POOR_OFF      110
+#define CO_MAX_PPM 100
+#define AQI_MAX 500
 
 // --- Globals ---
 volatile int data_ready = 0;
@@ -47,7 +39,7 @@ char lcdBuffer[20];
 int co_ppm = 0, aqi = 0, temp = 0, hum = 0;
 int display_cycle = 0;
 
-// --- Custom LCD Bar Characters ---
+// ... (bar_chars definition remains the same) ...
 unsigned char bar_chars[5][8] = {
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x1F},
     {0x00,0x00,0x00,0x00,0x00,0x00,0x1F,0x1F},
@@ -58,8 +50,11 @@ unsigned char bar_chars[5][8] = {
 
 // --- Timer Setup ---
 void initTimer0(void) {
+    // **FIX:** Moved declaration to top
+    uint32_t pclk; 
+    
     LPC_SC->PCONP |= (1 << 1);
-    uint32_t pclk = SystemCoreClock / 4;
+    pclk = SystemCoreClock / 4;
     LPC_TIM0->CTCR = 0x0;
     LPC_TIM0->PR = (pclk / 1000000) - 1;  
     LPC_TIM0->TCR = 0x02;
@@ -77,7 +72,7 @@ void delayMS(unsigned int ms) {
     while (ms--) delayUS(1000);
 }
 
-// --- LCD Control ---
+// ... (LCD functions are fine, declarations are at top) ...
 void lcd_pulse_enable(void) {
     LPC_GPIO0->FIOSET = LCD_EN;
     delayUS(1);
@@ -110,12 +105,18 @@ void lcd_data(unsigned char data) {
 }
 
 void lcd_create_char(unsigned char location, unsigned char *pattern) {
+    // **FIX:** Moved declaration to top
+    int i; 
+    
     lcd_command(0x40 | (location << 3));
-    for (int i = 0; i < 8; i++) lcd_data(pattern[i]);
+    for (i = 0; i < 8; i++) lcd_data(pattern[i]);
     lcd_command(0x80);
 }
 
 void lcd_init(void) {
+    // **FIX:** Moved declaration to top
+    int i; 
+    
     LPC_GPIO0->FIODIR |= LCD_DATA_MASK | LCD_RS | LCD_EN;
     delayMS(20);
 
@@ -130,7 +131,7 @@ void lcd_init(void) {
     lcd_command(0x01);
     delayMS(2);
 
-    for (int i = 0; i < 5; i++) lcd_create_char(i, bar_chars[i]);
+    for (i = 0; i < 5; i++) lcd_create_char(i, bar_chars[i]);
 }
 
 void lcd_string(const char *str) {
@@ -141,12 +142,16 @@ void lcd_string(const char *str) {
 
 // --- UART1 Setup ---
 void init_uart1(void) {
+    // **FIX:** Moved declarations to top
+    uint32_t pclk;
+    uint16_t divisor;
+    
     LPC_SC->PCONP |= (1 << 4);
     LPC_PINCON->PINSEL0 |= (1 << 30);
     LPC_PINCON->PINSEL1 |= (1 << 0);
 
-    uint32_t pclk = SystemCoreClock / 4;
-    uint16_t divisor = pclk / (16 * 9600);
+    pclk = SystemCoreClock / 4;
+    divisor = pclk / (16 * 9600);
 
     LPC_UART1->LCR = 0x83;
     LPC_UART1->DLL = divisor & 0xFF;
@@ -159,8 +164,10 @@ void init_uart1(void) {
 }
 
 void UART1_IRQHandler(void) {
+    // (Static declarations are fine)
     static int rx_index = 0;
     char c;
+    
     while (LPC_UART1->LSR & 0x01) {
         c = LPC_UART1->RBR;
         if (c == '\n' || c == '\r') {
@@ -175,7 +182,7 @@ void UART1_IRQHandler(void) {
     }
 }
 
-// --- State Machine ---
+// ... (update_system_state is fine) ...
 void update_system_state(int co_ppm, int aqi) {
     if (co_ppm > CO_HAZARD_ON || aqi > AQ_HAZARD_ON) {
         currentState = HAZARDOUS;
@@ -191,20 +198,20 @@ void update_system_state(int co_ppm, int aqi) {
             LPC_GPIO0->FIOCLR = BUZZER;
         }
     }
-    else { // This is the GOOD state
+    else { 
         currentState = GOOD;
         LPC_GPIO0->FIOCLR = BUZZER;
     }
 }
 
-// --- Display Modes ---
+// ... (display_mode_1 is fine) ...
 void display_mode_1(void) {
     lcd_command(0x80);
-    sprintf(lcdBuffer, "CO:%3dppm       ", co_ppm); // Fixed spacing
+    sprintf(lcdBuffer, "CO:%3dppm       ", co_ppm); 
     lcd_string(lcdBuffer);
 
     lcd_command(0xC0);
-    sprintf(lcdBuffer, "AQI:%3d         ", aqi); // Fixed spacing
+    sprintf(lcdBuffer, "AQI:%3d         ", aqi); 
     lcd_string(lcdBuffer);
 }
 
@@ -224,8 +231,12 @@ void display_mode_2(void) {
 }
 
 void display_mode_3(void) {
-    int co_percent = (co_ppm * 100) / CO_MAX_PPM;
-    int aq_percent = (aqi * 100) / AQI_MAX;   
+    // **FIX:** Moved declarations to top
+    int co_percent;
+    int aq_percent;
+    
+    co_percent = (co_ppm * 100) / CO_MAX_PPM;
+    aq_percent = (aqi * 100) / AQI_MAX;   
     
     if (co_percent > 100) co_percent = 100;
     if (aq_percent > 100) aq_percent = 100;
@@ -252,6 +263,9 @@ void display_mode_4(void) {
 
 // --- Main ---
 int main(void) {
+    // **FIX:** Moved all declarations to top of main
+    int update_counter = 0;
+    
     SystemInit();
     SystemCoreClockUpdate();
     initTimer0();
@@ -264,8 +278,6 @@ int main(void) {
     lcd_command(0x80); lcd_string("Air Quality Mon.");
     lcd_command(0xC0); lcd_string("Initializing...");
     delayMS(1000);
-
-    int update_counter = 0;
 
     while (1) {
         if (data_ready) {
