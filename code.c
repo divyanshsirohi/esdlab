@@ -270,22 +270,27 @@ void update_system_state(float co_score, float aqi_score) {
 }
 
 // --- Display Modes (Unchanged, they still show PPM/AQI) ---
+// --- Display Modes (Fixed Padding) ---
 void display_mode_1(void) {
     lcd_command(0x80);
+    // Padded to 16 chars: "CO:XXXppm       "
     sprintf(lcdBuffer, "CO:%3dppm       ", co_ppm); 
     lcd_string(lcdBuffer);
 
     lcd_command(0xC0);
+    // Padded to 16 chars: "AQI:XXX         "
     sprintf(lcdBuffer, "AQI:%3d         ", aqi); 
     lcd_string(lcdBuffer);
 }
 
 void display_mode_2(void) {
     lcd_command(0x80);
+    // Padded to 16 chars: "Status:HAZARD   "
     sprintf(lcdBuffer, "Status:%-8s", stateNames[currentState]);
     lcd_string(lcdBuffer);
 
     lcd_command(0xC0);
+    // These are already 16 chars, so they are fine
     switch(currentState) {
         case GOOD:     lcd_string("Air is Clean!   "); break;
         case MODERATE: lcd_string("Acceptable Air  "); break;
@@ -306,25 +311,28 @@ void display_mode_3(void) {
     if (aq_percent > 100) aq_percent = 100;
 
     lcd_command(0x80);
-    sprintf(lcdBuffer, "CO Level: %3d%%", co_percent);
+    // Padded to 16 chars: "CO Level: XXX%  "
+    sprintf(lcdBuffer, "CO Level: %3d%%  ", co_percent);
     lcd_string(lcdBuffer);
 
     lcd_command(0xC0);
-    sprintf(lcdBuffer, "AQ Level: %3d%%", aq_percent);
+    // Padded to 16 chars: "AQ Level: XXX%  "
+    sprintf(lcdBuffer, "AQ Level: %3d%%  ", aq_percent);
     lcd_string(lcdBuffer);
 }
 
 void display_mode_4(void) {
     lcd_command(0x80);
-    sprintf(lcdBuffer, "T:%2d\xDF""C  H:%2d%%", temp, hum);
+    // Padded to 16 chars: "T:XXCH:XX% "
+    sprintf(lcdBuffer, "T:%2d\xDF""C  H:%2d%% ", temp, hum);
     lcd_string(lcdBuffer);
 
     lcd_command(0xC0);
+    // These are already 16 chars, so they are fine
     if (hum < 30)       lcd_string("Dry             ");
     else if (hum <=60)  lcd_string("Feels Good      ");
     else                lcd_string("Humid           ");
 }
-
 // --- Main ---
 int main(void) {
     int update_counter = 0;
