@@ -1,7 +1,8 @@
 /*
  * ==========================================================================
- * LPC1768 Air Quality Monitor - v1.8 (C90 Compliant)
- * - Fixed all "declaration after statement" errors
+ * LPC1768 Air Quality Monitor - v2.0 (Simulated ML)
+ * - Added "ML" prediction layer
+ * - Logic is based on a calculated "hazard score"
  * ==========================================================================
  */
 
@@ -20,15 +21,38 @@ enum AirQualityState { GOOD, MODERATE, POOR, HAZARDOUS };
 enum AirQualityState currentState = GOOD;
 const char *stateNames[] = {"GOOD", "MODERATE", "POOR", "HAZARD"};
 
-// ... (Your thresholds remain the same) ...
-#define CO_MODERATE_ON   25
-#define CO_POOR_ON       35
-#define CO_HAZARD_ON     45
-#define AQ_MODERATE_ON   80
-#define AQ_POOR_ON       120
-#define AQ_HAZARD_ON     200
-#define CO_POOR_OFF      30
-#define AQ_POOR_OFF      110
+
+// *** NEW: SIMULATED "ML MODEL" PARAMETERS ***
+// These "weights" and "biases" are what your "model" learned.
+// (We've just invented them, but they look plausible).
+
+// CO Model: score = (co * w1) + (temp * w2) + (hum * w3) + bias
+const float CO_PPM_WEIGHT = 0.8f;
+const float CO_TEMP_WEIGHT = 0.15f;
+const float CO_HUM_WEIGHT = 0.1f;
+const float CO_BIAS = -10.0f;
+
+// AQI Model: score = (aqi * w1) + (temp * w2) + (hum * w3) + bias
+const float AQI_VAL_WEIGHT = 0.7f;
+const float AQI_TEMP_WEIGHT = -0.1f;
+const float AQI_HUM_WEIGHT = 0.25f;
+const float AQI_BIAS = 5.0f;
+
+
+// *** MODIFIED: Thresholds are now for the SCORE, not raw PPM ***
+#define CO_SCORE_MODERATE_ON   20.0f
+#define CO_SCORE_POOR_ON       30.0f // Buzzer ON
+#define CO_SCORE_HAZARD_ON     40.0f
+
+#define AQI_SCORE_MODERATE_ON  70.0f
+#define AQI_SCORE_POOR_ON      110.0f // Buzzer ON
+#define AQI_SCORE_HAZARD_ON    180.0f
+
+// Hysteresis "turn-off" thresholds for the SCORE
+#define CO_SCORE_POOR_OFF      27.0f // Buzzer OFF
+#define AQI_SCORE_POOR_OFF     100.0f // Buzzer OFF
+
+// Max values for percentage display
 #define CO_MAX_PPM 100
 #define AQI_MAX 500
 
@@ -50,9 +74,7 @@ unsigned char bar_chars[5][8] = {
 
 // --- Timer Setup ---
 void initTimer0(void) {
-    // **FIX:** Moved declaration to top
     uint32_t pclk; 
-    
     LPC_SC->PCONP |= (1 << 1);
     pclk = SystemCoreClock / 4;
     LPC_TIM0->CTCR = 0x0;
@@ -72,7 +94,7 @@ void delayMS(unsigned int ms) {
     while (ms--) delayUS(1000);
 }
 
-// ... (LCD functions are fine, declarations are at top) ...
+// ... (LCD functions remain the same) ...
 void lcd_pulse_enable(void) {
     LPC_GPIO0->FIOSET = LCD_EN;
     delayUS(1);
@@ -89,7 +111,6 @@ void lcd_send_nibble(unsigned char nibble) {
 void lcd_send_byte(unsigned char byte, int is_data) {
     if (is_data) LPC_GPIO0->FIOSET = LCD_RS;
     else LPC_GPIO0->FIOCLR = LCD_RS;
-
     lcd_send_nibble(byte >> 4);
     lcd_send_nibble(byte & 0x0F);
 }
@@ -105,32 +126,25 @@ void lcd_data(unsigned char data) {
 }
 
 void lcd_create_char(unsigned char location, unsigned char *pattern) {
-    // **FIX:** Moved declaration to top
     int i; 
-    
     lcd_command(0x40 | (location << 3));
     for (i = 0; i < 8; i++) lcd_data(pattern[i]);
     lcd_command(0x80);
 }
 
 void lcd_init(void) {
-    // **FIX:** Moved declaration to top
     int i; 
-    
     LPC_GPIO0->FIODIR |= LCD_DATA_MASK | LCD_RS | LCD_EN;
     delayMS(20);
-
     lcd_send_nibble(0x03); delayMS(5);
     lcd_send_nibble(0x03); delayUS(100);
     lcd_send_nibble(0x03); delayUS(100);
     lcd_send_nibble(0x02); delayUS(100);
-
     lcd_command(0x28);
     lcd_command(0x0C);
     lcd_command(0x06);
     lcd_command(0x01);
     delayMS(2);
-
     for (i = 0; i < 5; i++) lcd_create_char(i, bar_chars[i]);
 }
 
@@ -142,29 +156,24 @@ void lcd_string(const char *str) {
 
 // --- UART1 Setup ---
 void init_uart1(void) {
-    // **FIX:** Moved declarations to top
     uint32_t pclk;
     uint16_t divisor;
     
     LPC_SC->PCONP |= (1 << 4);
     LPC_PINCON->PINSEL0 |= (1 << 30);
     LPC_PINCON->PINSEL1 |= (1 << 0);
-
     pclk = SystemCoreClock / 4;
     divisor = pclk / (16 * 9600);
-
     LPC_UART1->LCR = 0x83;
     LPC_UART1->DLL = divisor & 0xFF;
     LPC_UART1->DLM = (divisor >> 8) & 0xFF;
     LPC_UART1->LCR = 0x03;
     LPC_UART1->FCR = 0x07;
     LPC_UART1->IER = (1 << 0);
-
     NVIC_EnableIRQ(UART1_IRQn);
 }
 
 void UART1_IRQHandler(void) {
-    // (Static declarations are fine)
     static int rx_index = 0;
     char c;
     
@@ -182,29 +191,84 @@ void UART1_IRQHandler(void) {
     }
 }
 
-// ... (update_system_state is fine) ...
-void update_system_state(int co_ppm, int aqi) {
-    if (co_ppm > CO_HAZARD_ON || aqi > AQ_HAZARD_ON) {
+
+// *** NEW: "ML" PREDICTION FUNCTIONS ***
+
+/*
+ * =======================================================
+ * PREDICTION FUNCTION: predict_co_hazard
+ * =======================================================
+ * Simulates a trained linear regression model.
+ * Features: 
+ * - x1: CO PPM (int)
+ * - x2: Temperature (int)
+ * - x3: Humidity (int)
+ * Output: 
+ * - y: Hazard Score (float)
+ * =======================================================
+ */
+float predict_co_hazard(int ppm, int temp_c, int hum_pct) {
+    float score;
+    score = (ppm * CO_PPM_WEIGHT) + 
+            (temp_c * CO_TEMP_WEIGHT) + 
+            (hum_pct * CO_HUM_WEIGHT) + 
+            CO_BIAS;
+            
+    // Ensure score is not negative
+    if (score < 0) score = 0;
+    return score;
+}
+
+/*
+ * =======================================================
+ * PREDICTION FUNCTION: predict_aqi_hazard
+ * =======================================================
+ * Simulates a trained linear regression model.
+ * Features: 
+ * - x1: AQI (int)
+ * - x2: Temperature (int)
+ * - x3: Humidity (int)
+ * Output: 
+ * - y: Hazard Score (float)
+ * =======================================================
+ */
+float predict_aqi_hazard(int aqi_val, int temp_c, int hum_pct) {
+    float score;
+    score = (aqi_val * AQI_VAL_WEIGHT) + 
+            (temp_c * AQI_TEMP_WEIGHT) + 
+            (hum_pct * AQI_HUM_WEIGHT) + 
+            AQI_BIAS;
+            
+    // Ensure score is not negative
+    if (score < 0) score = 0;
+    return score;
+}
+
+
+// *** MODIFIED: State Machine now uses SCORES ***
+void update_system_state(float co_score, float aqi_score) {
+    if (co_score > CO_SCORE_HAZARD_ON || aqi_score > AQI_SCORE_HAZARD_ON) {
         currentState = HAZARDOUS;
         LPC_GPIO0->FIOSET = BUZZER;
     } 
-    else if (co_ppm > CO_POOR_ON || aqi > AQ_POOR_ON) {
+    else if (co_score > CO_SCORE_POOR_ON || aqi_score > AQI_SCORE_POOR_ON) {
         currentState = POOR;
         LPC_GPIO0->FIOSET = BUZZER;
     }
-    else if (co_ppm > CO_MODERATE_ON || aqi > AQ_MODERATE_ON) {
+    else if (co_score > CO_SCORE_MODERATE_ON || aqi_score > AQI_SCORE_MODERATE_ON) {
         currentState = MODERATE;
-        if (co_ppm < CO_POOR_OFF && aqi < AQ_POOR_OFF) {
+        // Hysteresis
+        if (co_score < CO_SCORE_POOR_OFF && aqi_score < AQI_SCORE_POOR_OFF) {
             LPC_GPIO0->FIOCLR = BUZZER;
         }
     }
-    else { 
+    else { // This is the GOOD state
         currentState = GOOD;
         LPC_GPIO0->FIOCLR = BUZZER;
     }
 }
 
-// ... (display_mode_1 is fine) ...
+// --- Display Modes (Unchanged, they still show PPM/AQI) ---
 void display_mode_1(void) {
     lcd_command(0x80);
     sprintf(lcdBuffer, "CO:%3dppm       ", co_ppm); 
@@ -231,7 +295,6 @@ void display_mode_2(void) {
 }
 
 void display_mode_3(void) {
-    // **FIX:** Moved declarations to top
     int co_percent;
     int aq_percent;
     
@@ -263,8 +326,10 @@ void display_mode_4(void) {
 
 // --- Main ---
 int main(void) {
-    // **FIX:** Moved all declarations to top of main
     int update_counter = 0;
+    // *** NEW: Variables for our scores ***
+    float co_hazard_score;
+    float aqi_hazard_score;
     
     SystemInit();
     SystemCoreClockUpdate();
@@ -285,8 +350,14 @@ int main(void) {
 
             if (sscanf(rx_buffer, "%d,%d,%d,%d", &co_ppm, &aqi, &temp, &hum) == 4) {
                 
-                update_system_state(co_ppm, aqi);
+                // *** MODIFIED: Call prediction functions ***
+                co_hazard_score = predict_co_hazard(co_ppm, temp, hum);
+                aqi_hazard_score = predict_aqi_hazard(aqi, temp, hum);
+                
+                // Pass the *scores* to the state machine
+                update_system_state(co_hazard_score, aqi_hazard_score);
 
+                // This part is the same, it just cycles the display
                 update_counter++;
                 if (update_counter >= 5) {
                     update_counter = 0;
