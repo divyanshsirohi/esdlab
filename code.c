@@ -245,27 +245,30 @@ float predict_aqi_hazard(int aqi_val, int temp_c, int hum_pct) {
     return score;
 }
 
-
-// *** MODIFIED: State Machine now uses SCORES ***
+// *** MODIFIED: State Machine now uses SCORES and CORRECT Hysteresis ***
 void update_system_state(float co_score, float aqi_score) {
     if (co_score > CO_SCORE_HAZARD_ON || aqi_score > AQI_SCORE_HAZARD_ON) {
         currentState = HAZARDOUS;
-        LPC_GPIO0->FIOSET = BUZZER;
+        LPC_GPIO0->FIOSET = BUZZER; // Buzzer ON
     } 
     else if (co_score > CO_SCORE_POOR_ON || aqi_score > AQI_SCORE_POOR_ON) {
         currentState = POOR;
-        LPC_GPIO0->FIOSET = BUZZER;
+        LPC_GPIO0->FIOSET = BUZZER; // Buzzer ON
     }
     else if (co_score > CO_SCORE_MODERATE_ON || aqi_score > AQI_SCORE_MODERATE_ON) {
         currentState = MODERATE;
-        // Hysteresis
+        
+        // --- THIS IS THE FIX ---
+        // Only turn the buzzer OFF if the score drops *below* the OFF threshold.
+        // If the score is just "MODERATE" (e.g., 29), the buzzer will stay ON.
         if (co_score < CO_SCORE_POOR_OFF && aqi_score < AQI_SCORE_POOR_OFF) {
-            LPC_GPIO0->FIOCLR = BUZZER;
+            LPC_GPIO0->FIOCLR = BUZZER; // Buzzer OFF
         }
+        // --- END FIX ---
     }
     else { // This is the GOOD state
         currentState = GOOD;
-        LPC_GPIO0->FIOCLR = BUZZER;
+        LPC_GPIO0->FIOCLR = BUZZER; // Buzzer OFF
     }
 }
 
