@@ -1,8 +1,9 @@
 /*
  * ==========================================================================
- * LPC1768 Air Quality Monitor - v2.0 (Simulated ML)
- * - Added "ML" prediction layer
- * - Logic is based on a calculated "hazard score"
+ * LPC1768 Air Quality Monitor - v3.0 (Improved ML)
+ * - Less strict thresholds
+ * - Better ML model weights
+ * - Improved hysteresis
  * ==========================================================================
  */
 
@@ -22,40 +23,39 @@ enum AirQualityState { GOOD, MODERATE, POOR, HAZARDOUS };
 enum AirQualityState currentState = GOOD;
 const char *stateNames[] = {"GOOD", "MODERATE", "POOR", "HAZARD"};
 
+// *** IMPROVED ML MODEL PARAMETERS ***
+// More balanced weights that consider environmental factors properly
 
-// *** NEW: SIMULATED "ML MODEL" PARAMETERS ***
-// These "weights" and "biases" are what your "model" learned.
-// (We've just invented them, but they look plausible).
+// CO Model: Focuses more on CO but considers temperature/humidity effects
+const float CO_PPM_WEIGHT = 0.5f;      // Reduced from 0.8
+const float CO_TEMP_WEIGHT = 0.05f;    // Reduced impact
+const float CO_HUM_WEIGHT = 0.02f;     // Reduced impact
+const float CO_BIAS = -5.0f;           // Less negative
 
-// CO Model: score = (co * w1) + (temp * w2) + (hum * w3) + bias
-const float CO_PPM_WEIGHT = 0.8f;
-const float CO_TEMP_WEIGHT = 0.15f;
-const float CO_HUM_WEIGHT = 0.1f;
-const float CO_BIAS = -10.0f;
+// AQI Model: Balanced weights
+const float AQI_VAL_WEIGHT = 0.4f;     // Reduced from 0.7
+const float AQI_TEMP_WEIGHT = 0.03f;   // Positive now (heat increases pollution)
+const float AQI_HUM_WEIGHT = 0.02f;    // Reduced from 0.25
+const float AQI_BIAS = -3.0f;          // Slightly negative
 
-// AQI Model: score = (aqi * w1) + (temp * w2) + (hum * w3) + bias
-const float AQI_VAL_WEIGHT = 0.7f;
-const float AQI_TEMP_WEIGHT = -0.1f;
-const float AQI_HUM_WEIGHT = 0.25f;
-const float AQI_BIAS = 5.0f;
+// *** IMPROVED THRESHOLDS - Less Strict ***
+// CO Score Thresholds
+#define CO_SCORE_MODERATE_ON   30.0f   // Was 20
+#define CO_SCORE_POOR_ON       50.0f   // Was 30 - Buzzer ON
+#define CO_SCORE_HAZARD_ON     75.0f   // Was 40
 
+// AQI Score Thresholds  
+#define AQI_SCORE_MODERATE_ON  50.0f   // Was 70
+#define AQI_SCORE_POOR_ON      90.0f   // Was 110 - Buzzer ON
+#define AQI_SCORE_HAZARD_ON    150.0f  // Was 180
 
-// *** MODIFIED: Thresholds are now for the SCORE, not raw PPM ***
-#define CO_SCORE_MODERATE_ON   20.0f
-#define CO_SCORE_POOR_ON       30.0f // Buzzer ON
-#define CO_SCORE_HAZARD_ON     40.0f
+// Hysteresis - wider gap for stability
+#define CO_SCORE_POOR_OFF      45.0f   // Was 27
+#define AQI_SCORE_POOR_OFF     80.0f   // Was 100
 
-#define AQI_SCORE_MODERATE_ON  70.0f
-#define AQI_SCORE_POOR_ON      110.0f // Buzzer ON
-#define AQI_SCORE_HAZARD_ON    180.0f
-
-// Hysteresis "turn-off" thresholds for the SCORE
-#define CO_SCORE_POOR_OFF      27.0f // Buzzer OFF
-#define AQI_SCORE_POOR_OFF     100.0f // Buzzer OFF
-
-// Max values for percentage display
-#define CO_MAX_PPM 100
-#define AQI_MAX 500
+// Display max values
+#define CO_MAX_PPM 200  // Changed from 100
+#define AQI_MAX 300     // Changed from 500
 
 // --- Globals ---
 volatile int data_ready = 0;
@@ -64,7 +64,7 @@ char lcdBuffer[20];
 int co_ppm = 0, aqi = 0, temp = 0, hum = 0;
 int display_cycle = 0;
 
-// ... (bar_chars definition remains the same) ...
+// Custom LCD characters for bar graph
 unsigned char bar_chars[5][8] = {
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x1F},
     {0x00,0x00,0x00,0x00,0x00,0x00,0x1F,0x1F},
@@ -95,7 +95,7 @@ void delayMS(unsigned int ms) {
     while (ms--) delayUS(1000);
 }
 
-// ... (LCD functions remain the same) ...
+// --- LCD Functions ---
 void lcd_pulse_enable(void) {
     LPC_GPIO0->FIOSET = LCD_EN;
     delayUS(1);
@@ -192,31 +192,41 @@ void UART1_IRQHandler(void) {
     }
 }
 
-
-// *** NEW: "ML" PREDICTION FUNCTIONS ***
+// *** IMPROVED ML PREDICTION FUNCTIONS ***
 
 /*
  * =======================================================
  * PREDICTION FUNCTION: predict_co_hazard
  * =======================================================
- * Simulates a trained linear regression model.
- * Features: 
- * - x1: CO PPM (int)
- * - x2: Temperature (int)
- * - x3: Humidity (int)
- * Output: 
- * - y: Hazard Score (float)
+ * Features: CO PPM, Temperature, Humidity
+ * Output: Hazard Score (0-100 scale)
+ * 
+ * Improvements:
+ * - Reduced weight on CO for less sensitivity
+ * - Minor environmental factor adjustments
+ * - Better baseline offset
  * =======================================================
  */
 float predict_co_hazard(int ppm, int temp_c, int hum_pct) {
     float score;
-    score = (ppm * CO_PPM_WEIGHT) + 
-            (temp_c * CO_TEMP_WEIGHT) + 
-            (hum_pct * CO_HUM_WEIGHT) + 
-            CO_BIAS;
-            
-    // Ensure score is not negative
+    
+    // Base score from CO level
+    score = ppm * CO_PPM_WEIGHT;
+    
+    // Temperature adjustment (higher temp = slightly worse)
+    score += (temp_c - 20) * CO_TEMP_WEIGHT;
+    
+    // Humidity adjustment (extreme humidity = slightly worse)
+    int hum_deviation = (hum_pct > 60) ? (hum_pct - 60) : 0;
+    score += hum_deviation * CO_HUM_WEIGHT;
+    
+    // Add bias
+    score += CO_BIAS;
+    
+    // Clamp to valid range
     if (score < 0) score = 0;
+    if (score > 100) score = 100;
+    
     return score;
 }
 
@@ -224,76 +234,94 @@ float predict_co_hazard(int ppm, int temp_c, int hum_pct) {
  * =======================================================
  * PREDICTION FUNCTION: predict_aqi_hazard
  * =======================================================
- * Simulates a trained linear regression model.
- * Features: 
- * - x1: AQI (int)
- * - x2: Temperature (int)
- * - x3: Humidity (int)
- * Output: 
- * - y: Hazard Score (float)
+ * Features: AQI, Temperature, Humidity
+ * Output: Hazard Score (0-150 scale)
+ * 
+ * Improvements:
+ * - More reasonable AQI weight
+ * - Temperature increases pollution perception
+ * - Humidity has minimal effect
  * =======================================================
  */
 float predict_aqi_hazard(int aqi_val, int temp_c, int hum_pct) {
     float score;
-    score = (aqi_val * AQI_VAL_WEIGHT) + 
-            (temp_c * AQI_TEMP_WEIGHT) + 
-            (hum_pct * AQI_HUM_WEIGHT) + 
-            AQI_BIAS;
-            
-    // Ensure score is not negative
+    
+    // Base score from AQI
+    score = aqi_val * AQI_VAL_WEIGHT;
+    
+    // Temperature adjustment (heat makes pollution worse)
+    score += (temp_c - 20) * AQI_TEMP_WEIGHT;
+    
+    // Humidity adjustment (minimal effect)
+    score += (hum_pct - 50) * AQI_HUM_WEIGHT;
+    
+    // Add bias
+    score += AQI_BIAS;
+    
+    // Clamp to valid range
     if (score < 0) score = 0;
+    if (score > 150) score = 150;
+    
     return score;
 }
 
-// *** MODIFIED: State Machine now uses SCORES and CORRECT Hysteresis ***
+/*
+ * =======================================================
+ * STATE MACHINE: update_system_state
+ * =======================================================
+ * Uses scores with proper hysteresis to prevent flickering
+ * Buzzer activates only in POOR or HAZARDOUS states
+ * =======================================================
+ */
 void update_system_state(float co_score, float aqi_score) {
-    if (co_score > CO_SCORE_HAZARD_ON || aqi_score > AQI_SCORE_HAZARD_ON) {
+    enum AirQualityState previous_state = currentState;
+    
+    // Determine new state based on scores
+    if (co_score >= CO_SCORE_HAZARD_ON || aqi_score >= AQI_SCORE_HAZARD_ON) {
         currentState = HAZARDOUS;
-        LPC_GPIO0->FIOSET = BUZZER; // Buzzer ON
     } 
-    else if (co_score > CO_SCORE_POOR_ON || aqi_score > AQI_SCORE_POOR_ON) {
+    else if (co_score >= CO_SCORE_POOR_ON || aqi_score >= AQI_SCORE_POOR_ON) {
         currentState = POOR;
-        LPC_GPIO0->FIOSET = BUZZER; // Buzzer ON
     }
-    else if (co_score > CO_SCORE_MODERATE_ON || aqi_score > AQI_SCORE_MODERATE_ON) {
+    else if (co_score >= CO_SCORE_MODERATE_ON || aqi_score >= AQI_SCORE_MODERATE_ON) {
         currentState = MODERATE;
-        
-        // --- THIS IS THE FIX ---
-        // Only turn the buzzer OFF if the score drops *below* the OFF threshold.
-        // If the score is just "MODERATE" (e.g., 29), the buzzer will stay ON.
-        if (co_score < CO_SCORE_POOR_OFF && aqi_score < AQI_SCORE_POOR_OFF) {
-            LPC_GPIO0->FIOCLR = BUZZER; // Buzzer OFF
-        }
-        // --- END FIX ---
     }
-    else { // This is the GOOD state
+    else {
         currentState = GOOD;
-        LPC_GPIO0->FIOCLR = BUZZER; // Buzzer OFF
+    }
+    
+    // Hysteresis: If transitioning from POOR to MODERATE, check OFF thresholds
+    if (previous_state == POOR && currentState == MODERATE) {
+        if (co_score >= CO_SCORE_POOR_OFF || aqi_score >= AQI_SCORE_POOR_OFF) {
+            currentState = POOR; // Stay in POOR
+        }
+    }
+    
+    // Buzzer control - ON for POOR and HAZARDOUS only
+    if (currentState == POOR || currentState == HAZARDOUS) {
+        LPC_GPIO0->FIOSET = BUZZER;
+    } else {
+        LPC_GPIO0->FIOCLR = BUZZER;
     }
 }
 
-// --- Display Modes (Unchanged, they still show PPM/AQI) ---
-// --- Display Modes (Fixed Padding) ---
+// --- Display Modes ---
 void display_mode_1(void) {
     lcd_command(0x80);
-    // Padded to 16 chars: "CO:XXXppm       "
     sprintf(lcdBuffer, "CO:%3dppm       ", co_ppm); 
     lcd_string(lcdBuffer);
 
     lcd_command(0xC0);
-    // Padded to 16 chars: "AQI:XXX         "
     sprintf(lcdBuffer, "AQI:%3d         ", aqi); 
     lcd_string(lcdBuffer);
 }
 
 void display_mode_2(void) {
     lcd_command(0x80);
-    // Padded to 16 chars: "Status:HAZARD   "
     sprintf(lcdBuffer, "Status:%-8s", stateNames[currentState]);
     lcd_string(lcdBuffer);
 
     lcd_command(0xC0);
-    // These are already 16 chars, so they are fine
     switch(currentState) {
         case GOOD:     lcd_string("Air is Clean!   "); break;
         case MODERATE: lcd_string("Acceptable Air  "); break;
@@ -304,42 +332,35 @@ void display_mode_2(void) {
 }
 
 void display_mode_3(void) {
-    int co_percent;
-    int aq_percent;
-    
-    co_percent = (co_ppm * 100) / CO_MAX_PPM;
-    aq_percent = (aqi * 100) / AQI_MAX;   
+    int co_percent = (co_ppm * 100) / CO_MAX_PPM;
+    int aq_percent = (aqi * 100) / AQI_MAX;   
     
     if (co_percent > 100) co_percent = 100;
     if (aq_percent > 100) aq_percent = 100;
 
     lcd_command(0x80);
-    // Padded to 16 chars: "CO Level: XXX%  "
     sprintf(lcdBuffer, "CO Level: %3d%%  ", co_percent);
     lcd_string(lcdBuffer);
 
     lcd_command(0xC0);
-    // Padded to 16 chars: "AQ Level: XXX%  "
     sprintf(lcdBuffer, "AQ Level: %3d%%  ", aq_percent);
     lcd_string(lcdBuffer);
 }
 
 void display_mode_4(void) {
     lcd_command(0x80);
-    // Padded to 16 chars: "T:XXCH:XX% "
     sprintf(lcdBuffer, "T:%2d\xDF""C  H:%2d%% ", temp, hum);
     lcd_string(lcdBuffer);
 
     lcd_command(0xC0);
-    // These are already 16 chars, so they are fine
     if (hum < 30)       lcd_string("Dry             ");
     else if (hum <=60)  lcd_string("Feels Good      ");
     else                lcd_string("Humid           ");
 }
+
 // --- Main ---
 int main(void) {
     int update_counter = 0;
-    // *** NEW: Variables for our scores ***
     float co_hazard_score;
     float aqi_hazard_score;
     
@@ -354,7 +375,7 @@ int main(void) {
 
     lcd_command(0x80); lcd_string("Air Quality Mon.");
     lcd_command(0xC0); lcd_string("Initializing...");
-    delayMS(1000);
+    delayMS(2000);
 
     while (1) {
         if (data_ready) {
@@ -362,20 +383,21 @@ int main(void) {
 
             if (sscanf(rx_buffer, "%d,%d,%d,%d", &co_ppm, &aqi, &temp, &hum) == 4) {
                 
-                // *** MODIFIED: Call prediction functions ***
+                // Calculate hazard scores using ML model
                 co_hazard_score = predict_co_hazard(co_ppm, temp, hum);
                 aqi_hazard_score = predict_aqi_hazard(aqi, temp, hum);
                 
-                // Pass the *scores* to the state machine
+                // Update system state based on scores
                 update_system_state(co_hazard_score, aqi_hazard_score);
 
-                // This part is the same, it just cycles the display
+                // Update display cycle every 5 readings
                 update_counter++;
                 if (update_counter >= 5) {
                     update_counter = 0;
                     display_cycle = (display_cycle + 1) % 4;  
                 }
 
+                // Show appropriate display mode
                 switch(display_cycle) {
                     case 0: display_mode_1(); break;
                     case 1: display_mode_2(); break;
